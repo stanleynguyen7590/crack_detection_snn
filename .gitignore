@@ -1,0 +1,4 @@
+SDNET2018/
+*.png
+sdnet_spiking/
+checkpoints/
