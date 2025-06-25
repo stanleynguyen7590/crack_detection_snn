@@ -21,6 +21,11 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
 
+# Import new evaluation modules
+from evaluation_metrics import ComprehensiveEvaluator, create_crackvision_style_table
+from cross_validation import CrossValidator, run_cross_validation_experiment
+from baseline_models import CNNBaseline, TraditionalBaseline, ModelComparator
+
 # SpikingJelly imports
 from spikingjelly.activation_based import neuron, functional, surrogate, layer
 from spikingjelly.activation_based.model import spiking_resnet
@@ -380,6 +385,17 @@ def parse_args():
     parser.add_argument('--train-ratio', type=float, default=0.8,
                        help='Ratio of data to use for training (rest for validation)')
     
+    # Evaluation modes (Phase 1 additions)
+    parser.add_argument('--eval-mode', type=str, default='train',
+                       choices=['train', 'cross_validation', 'baseline_comparison', 'comprehensive'],
+                       help='Evaluation mode to run')
+    parser.add_argument('--cv-folds', type=int, default=5,
+                       help='Number of folds for cross-validation')
+    parser.add_argument('--compare-baselines', action='store_true',
+                       help='Compare with CNN baselines (ResNet50, etc.)')
+    parser.add_argument('--results-dir', type=str, default='results',
+                       help='Directory to save evaluation results')
+    
     return parser.parse_args()
 
 def main():
@@ -398,6 +414,7 @@ def main():
     
     # Create save directory
     os.makedirs(args.save_dir, exist_ok=True)
+    os.makedirs(args.results_dir, exist_ok=True)
     
     # Create data loaders
     train_loader, val_loader = create_data_loaders(
@@ -442,6 +459,14 @@ def main():
     scaler = torch.amp.GradScaler('cuda') if use_amp else None
     
     print(f"Mixed precision training: {use_amp}")
+    
+    # Handle different evaluation modes
+    if args.eval_mode == 'cross_validation':
+        return run_cross_validation_mode(args, device)
+    elif args.eval_mode == 'baseline_comparison':
+        return run_baseline_comparison_mode(args, device)
+    elif args.eval_mode == 'comprehensive':
+        return run_comprehensive_evaluation_mode(args, device)
     
     # Training history
     train_losses, val_losses = [], []
@@ -539,6 +564,218 @@ def inference_example():
     labels = ['Uncracked', 'Cracked']
     print(f'Prediction: {labels[pred]}')
     print(f'Confidence: {prob[0, pred].item():.2%}')
+
+def run_cross_validation_mode(args, device):
+    """Run cross-validation evaluation mode"""
+    print("\n" + "="*60)
+    print("RUNNING CROSS-VALIDATION EVALUATION")
+    print("="*60)
+    
+    # Create full dataset for CV
+    full_dataset = SDNET2018Dataset(
+        args.data_dir, 
+        split='train',  # We'll handle splitting in CV
+        transform=transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ]),
+        train_ratio=1.0  # Use full dataset
+    )
+    
+    # CV configuration
+    config = {
+        'n_folds': args.cv_folds,
+        'train_params': {
+            'model_params': {
+                'spiking_neuron': neuron.IFNode,
+                'surrogate_function': surrogate.ATan(),
+                'num_classes': args.num_classes,
+                'T': args.time_steps
+            },
+            'learning_rate': args.learning_rate,
+            'weight_decay': args.weight_decay,
+            'num_epochs': args.num_epochs
+        },
+        'data_params': {
+            'batch_size': args.batch_size,
+            'num_workers': args.num_workers
+        },
+        'save_path': os.path.join(args.results_dir, 'snn_cv_results.json')
+    }
+    
+    # Run CV evaluation
+    results = run_cross_validation_experiment(
+        SpikingResNetCrackDetector, full_dataset, config
+    )
+    
+    print("\nCross-validation completed successfully!")
+    return results
+
+def run_baseline_comparison_mode(args, device):
+    """Run baseline comparison evaluation mode"""
+    print("\n" + "="*60)
+    print("RUNNING BASELINE COMPARISON EVALUATION")
+    print("="*60)
+    
+    # Create data loaders
+    train_loader, val_loader = create_data_loaders(
+        args.data_dir, 
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        train_ratio=args.train_ratio
+    )
+    
+    comparator = ModelComparator()
+    
+    # Evaluate SNN
+    print("\n1. Evaluating Spiking ResNet...")
+    snn_model = SpikingResNetCrackDetector(
+        spiking_neuron=neuron.IFNode,
+        surrogate_function=surrogate.ATan(),
+        num_classes=args.num_classes,
+        T=args.time_steps
+    ).to(device)
+    
+    snn_results = evaluate_model_comprehensive(snn_model, train_loader, val_loader, device, args)
+    comparator.add_model_results("Spiking ResNet", snn_results)
+    
+    # Evaluate CNN baselines
+    print("\n2. Evaluating CNN Baselines...")
+    cnn_models = {
+        "ResNet50 (CrackVision)": CNNBaseline('resnet50', args.num_classes),
+        "ResNet18": CNNBaseline('resnet18', args.num_classes),
+        "Xception-style": CNNBaseline('xception_style', args.num_classes)
+    }
+    
+    for model_name, model in cnn_models.items():
+        print(f"\nEvaluating {model_name}...")
+        model = model.to(device)
+        results = evaluate_model_comprehensive(model, train_loader, val_loader, device, args)
+        comparator.add_model_results(model_name, results)
+    
+    # Generate comparison table
+    comparator.generate_crackvision_comparison_table()
+    
+    # Save results
+    results_path = os.path.join(args.results_dir, 'baseline_comparison.json')
+    import json
+    with open(results_path, 'w') as f:
+        json.dump(comparator.results, f, indent=2, default=str)
+    
+    print(f"\nBaseline comparison results saved to {results_path}")
+    return comparator.results
+
+def run_comprehensive_evaluation_mode(args, device):
+    """Run comprehensive evaluation combining CV and baseline comparison"""
+    print("\n" + "="*60)
+    print("RUNNING COMPREHENSIVE EVALUATION")
+    print("="*60)
+    
+    # Run cross-validation
+    print("\nPhase 1: Cross-Validation...")
+    cv_results = run_cross_validation_mode(args, device)
+    
+    # Run baseline comparison
+    print("\nPhase 2: Baseline Comparison...")
+    baseline_results = run_baseline_comparison_mode(args, device)
+    
+    # Combined analysis
+    print("\nPhase 3: Combined Analysis...")
+    evaluator = ComprehensiveEvaluator()
+    
+    # Create comprehensive comparison table
+    create_crackvision_style_table(baseline_results, "SDNET2018")
+    
+    # Save comprehensive results
+    comprehensive_results = {
+        'cross_validation': cv_results,
+        'baseline_comparison': baseline_results,
+        'evaluation_date': str(torch.datetime.now()),
+        'configuration': vars(args)
+    }
+    
+    results_path = os.path.join(args.results_dir, 'comprehensive_evaluation.json')
+    import json
+    with open(results_path, 'w') as f:
+        json.dump(comprehensive_results, f, indent=2, default=str)
+    
+    print(f"\nComprehensive evaluation results saved to {results_path}")
+    return comprehensive_results
+
+def evaluate_model_comprehensive(model, train_loader, val_loader, device, args):
+    """Comprehensive model evaluation following CrackVision methodology"""
+    import time
+    
+    # Training
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(
+        model.parameters(), 
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay
+    )
+    
+    start_time = time.time()
+    
+    # Simple training loop
+    model.train()
+    for epoch in range(min(args.num_epochs, 10)):  # Limit epochs for comparison
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(device), target.to(device)
+            
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output, target)
+            loss.backward()
+            optimizer.step()
+            
+            if batch_idx % 50 == 0:
+                print(f'Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}')
+    
+    training_time = time.time() - start_time
+    
+    # Evaluation
+    model.eval()
+    all_preds = []
+    all_targets = []
+    all_probs = []
+    
+    start_time = time.time()
+    
+    with torch.no_grad():
+        for data, target in val_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            
+            pred = output.argmax(dim=1)
+            prob = torch.softmax(output, dim=1)
+            
+            all_preds.extend(pred.cpu().numpy())
+            all_targets.extend(target.cpu().numpy())
+            all_probs.extend(prob.cpu().numpy())
+    
+    inference_time = time.time() - start_time
+    
+    # Calculate metrics
+    evaluator = ComprehensiveEvaluator()
+    metrics = evaluator.calculate_comprehensive_metrics(
+        np.array(all_targets), 
+        np.array(all_preds),
+        np.array(all_probs)
+    )
+    
+    # Add timing information
+    metrics['training_time'] = training_time
+    metrics['inference_time'] = inference_time
+    metrics['inference_time_per_image'] = inference_time / len(all_targets)
+    
+    # Add model size (approximate)
+    total_params = sum(p.numel() for p in model.parameters())
+    metrics['total_parameters'] = total_params
+    metrics['model_size'] = total_params * 4 / (1024 * 1024)  # MB (assuming float32)
+    
+    return metrics
 
 if __name__ == '__main__':
     main()
