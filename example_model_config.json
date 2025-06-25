@@ -1,0 +1,22 @@
+[
+  {
+    "name": "Spiking ResNet-18",
+    "path": "checkpoints/best_model.pth",
+    "type": "snn"
+  },
+  {
+    "name": "ResNet50 Baseline",
+    "path": "checkpoints/resnet50_crackvision_baseline.pth",
+    "type": "resnet50"
+  },
+  {
+    "name": "ResNet18 Baseline", 
+    "path": "checkpoints/resnet18_baseline.pth",
+    "type": "resnet18"
+  },
+  {
+    "name": "Xception-style CNN",
+    "path": "checkpoints/xception_style_baseline.pth", 
+    "type": "xception"
+  }
+]

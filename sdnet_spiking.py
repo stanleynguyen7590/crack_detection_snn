@@ -188,7 +188,7 @@ class DirectEncodingSpikingResNet(nn.Module):
         
         # Process through ResNet
         out_spikes = []
-        for t in range(self.T):
+        for _ in range(self.T):
             out = self.features(spike_input)
             out_spikes.append(out)
         
@@ -299,44 +299,262 @@ def evaluate(model, loader, criterion, device):
     
     return avg_loss, accuracy, np.array(all_preds), np.array(all_targets)
 
-def plot_training_history(train_losses, val_losses, train_accs, val_accs):
+def plot_training_history(train_losses, val_losses, train_accs, val_accs, save_dir='plots'):
     """Plot training history"""
+    os.makedirs(save_dir, exist_ok=True)
+    
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
     
     # Loss plot
-    ax1.plot(train_losses, label='Train Loss')
-    ax1.plot(val_losses, label='Val Loss')
+    ax1.plot(train_losses, label='Train Loss', linewidth=2)
+    ax1.plot(val_losses, label='Val Loss', linewidth=2)
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss')
     ax1.set_title('Training and Validation Loss')
     ax1.legend()
-    ax1.grid(True)
+    ax1.grid(True, alpha=0.3)
     
     # Accuracy plot
-    ax2.plot(train_accs, label='Train Acc')
-    ax2.plot(val_accs, label='Val Acc')
+    ax2.plot(train_accs, label='Train Acc', linewidth=2)
+    ax2.plot(val_accs, label='Val Acc', linewidth=2)
     ax2.set_xlabel('Epoch')
     ax2.set_ylabel('Accuracy (%)')
     ax2.set_title('Training and Validation Accuracy')
     ax2.legend()
-    ax2.grid(True)
+    ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig('training_history.png')
-    plt.show()
+    save_path = os.path.join(save_dir, 'training_history.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Training history plot saved to {save_path}")
 
-def plot_confusion_matrix(y_true, y_pred):
+def plot_confusion_matrix(y_true, y_pred, save_dir='plots', model_name='model'):
     """Plot confusion matrix"""
+    os.makedirs(save_dir, exist_ok=True)
+    
     cm = confusion_matrix(y_true, y_pred)
     plt.figure(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
                 xticklabels=['Uncracked', 'Cracked'],
-                yticklabels=['Uncracked', 'Cracked'])
+                yticklabels=['Uncracked', 'Cracked'],
+                cbar_kws={'label': 'Count'})
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
-    plt.title('Confusion Matrix')
-    plt.savefig('confusion_matrix.png')
-    plt.show()
+    plt.title(f'Confusion Matrix - {model_name}')
+    
+    save_path = os.path.join(save_dir, f'confusion_matrix_{model_name.lower().replace(" ", "_")}.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Confusion matrix saved to {save_path}")
+    return save_path
+
+def plot_model_comparison(results_dict, save_dir='plots'):
+    """Plot comprehensive model comparison charts"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    models = list(results_dict.keys())
+    metrics = ['accuracy', 'precision', 'recall', 'f1_score']
+    
+    # Extract metric values
+    data = {metric: [] for metric in metrics}
+    for model in models:
+        for metric in metrics:
+            value = results_dict[model].get(metric, 0)
+            # Convert to percentage if needed
+            if metric == 'accuracy' and value <= 1.0:
+                value *= 100
+            elif metric in ['precision', 'recall', 'f1_score'] and value <= 1.0:
+                value *= 100
+            data[metric].append(value)
+    
+    # Create comparison plot
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    axes = [ax1, ax2, ax3, ax4]
+    colors = plt.cm.Set3(np.linspace(0, 1, len(models)))
+    
+    for i, metric in enumerate(metrics):
+        ax = axes[i]
+        bars = ax.bar(models, data[metric], color=colors, alpha=0.8, edgecolor='black')
+        ax.set_title(f'{metric.replace("_", " ").title()} Comparison', fontsize=14, fontweight='bold')
+        ax.set_ylabel(f'{metric.replace("_", " ").title()} (%)')
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(0, max(data[metric]) * 1.1)
+        
+        # Add value labels on bars
+        for bar, value in zip(bars, data[metric]):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                   f'{value:.1f}%', ha='center', va='bottom', fontweight='bold')
+        
+        # Rotate x-axis labels if needed
+        if len(max(models, key=len)) > 10:
+            ax.tick_params(axis='x', rotation=45)
+    
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, 'model_comparison.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Model comparison plot saved to {save_path}")
+    return save_path
+
+def plot_roc_curves(models_data, save_dir='plots'):
+    """Plot ROC curves for multiple models"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    plt.figure(figsize=(10, 8))
+    colors = plt.cm.Set1(np.linspace(0, 1, len(models_data)))
+    
+    for i, (model_name, data) in enumerate(models_data.items()):
+        if 'auc_roc' in data and 'y_true' in data and 'y_prob' in data:
+            from sklearn.metrics import roc_curve
+            fpr, tpr, _ = roc_curve(data['y_true'], data['y_prob'][:, 1])
+            auc_score = data['auc_roc']
+            plt.plot(fpr, tpr, color=colors[i], linewidth=2,
+                    label=f'{model_name} (AUC = {auc_score:.3f})')
+    
+    plt.plot([0, 1], [0, 1], 'k--', linewidth=1, alpha=0.7, label='Random Classifier')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curves Comparison')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    save_path = os.path.join(save_dir, 'roc_curves_comparison.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"ROC curves comparison saved to {save_path}")
+    return save_path
+
+def plot_training_time_comparison(results_dict, save_dir='plots'):
+    """Plot training time and efficiency comparisons"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    models = list(results_dict.keys())
+    training_times = []
+    inference_times = []
+    model_sizes = []
+    
+    for model in models:
+        training_times.append(results_dict[model].get('training_time', 0))
+        inference_times.append(results_dict[model].get('inference_time_per_image', 0) * 1000)  # Convert to ms
+        model_sizes.append(results_dict[model].get('model_size', 0))
+    
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    colors = plt.cm.viridis(np.linspace(0, 1, len(models)))
+    
+    # Training time
+    bars1 = ax1.bar(models, training_times, color=colors, alpha=0.8)
+    ax1.set_title('Training Time Comparison', fontweight='bold')
+    ax1.set_ylabel('Training Time (seconds)')
+    ax1.grid(True, alpha=0.3)
+    for bar, time in zip(bars1, training_times):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                f'{time:.1f}s', ha='center', va='bottom', fontweight='bold')
+    
+    # Inference time
+    bars2 = ax2.bar(models, inference_times, color=colors, alpha=0.8)
+    ax2.set_title('Inference Time per Image', fontweight='bold')
+    ax2.set_ylabel('Inference Time (ms)')
+    ax2.grid(True, alpha=0.3)
+    for bar, time in zip(bars2, inference_times):
+        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                f'{time:.2f}ms', ha='center', va='bottom', fontweight='bold')
+    
+    # Model size
+    bars3 = ax3.bar(models, model_sizes, color=colors, alpha=0.8)
+    ax3.set_title('Model Size Comparison', fontweight='bold')
+    ax3.set_ylabel('Model Size (MB)')
+    ax3.grid(True, alpha=0.3)
+    for bar, size in zip(bars3, model_sizes):
+        ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                f'{size:.1f}MB', ha='center', va='bottom', fontweight='bold')
+    
+    # Efficiency scatter plot (Accuracy vs Training Time)
+    accuracies = [results_dict[model].get('accuracy', 0) * 100 for model in models]
+    scatter = ax4.scatter(training_times, accuracies, c=range(len(models)), 
+                         cmap='viridis', s=100, alpha=0.8, edgecolors='black')
+    ax4.set_xlabel('Training Time (seconds)')
+    ax4.set_ylabel('Accuracy (%)')
+    ax4.set_title('Efficiency: Accuracy vs Training Time', fontweight='bold')
+    ax4.grid(True, alpha=0.3)
+    
+    # Add model labels to scatter plot
+    for i, model in enumerate(models):
+        ax4.annotate(model, (training_times[i], accuracies[i]), 
+                    xytext=(5, 5), textcoords='offset points', fontsize=9)
+    
+    # Rotate x-axis labels if needed
+    for ax in [ax1, ax2, ax3]:
+        if len(max(models, key=len)) > 10:
+            ax.tick_params(axis='x', rotation=45)
+    
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, 'efficiency_comparison.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Efficiency comparison plot saved to {save_path}")
+    return save_path
+
+def plot_cross_validation_results(cv_results, save_dir='plots'):
+    """Plot cross-validation results with error bars"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    if 'fold_results' not in cv_results:
+        return None
+    
+    # Extract metrics across folds
+    metrics = ['accuracy', 'precision', 'recall', 'f1_score', 'auc_roc']
+    fold_data = {metric: [] for metric in metrics}
+    
+    for fold_result in cv_results['fold_results']:
+        for metric in metrics:
+            if metric in fold_result:
+                fold_data[metric].append(fold_result[metric] * 100 if fold_result[metric] <= 1.0 else fold_result[metric])
+    
+    # Calculate mean and std
+    means = [np.mean(fold_data[metric]) for metric in metrics]
+    stds = [np.std(fold_data[metric]) for metric in metrics]
+    
+    # Create plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Bar plot with error bars
+    x_pos = np.arange(len(metrics))
+    colors = plt.cm.Set2(np.linspace(0, 1, len(metrics)))
+    bars = ax1.bar(x_pos, means, yerr=stds, capsize=5, color=colors, alpha=0.8, edgecolor='black')
+    ax1.set_xlabel('Metrics')
+    ax1.set_ylabel('Score (%)')
+    ax1.set_title('Cross-Validation Results (Mean ± Std)')
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels([m.replace('_', ' ').title() for m in metrics])
+    ax1.grid(True, alpha=0.3)
+    
+    # Add value labels
+    for bar, mean, std in zip(bars, means, stds):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + std + 0.5,
+                f'{mean:.1f}±{std:.1f}', ha='center', va='bottom', fontweight='bold')
+    
+    # Box plot for distribution
+    box_data = [fold_data[metric] for metric in metrics]
+    bp = ax2.boxplot(box_data, labels=[m.replace('_', ' ').title() for m in metrics],
+                     patch_artist=True, notch=True)
+    
+    # Color the boxes
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.8)
+    
+    ax2.set_ylabel('Score (%)')
+    ax2.set_title('Cross-Validation Score Distribution')
+    ax2.grid(True, alpha=0.3)
+    ax2.tick_params(axis='x', rotation=45)
+    
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, 'cross_validation_results.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Cross-validation results plot saved to {save_path}")
+    return save_path
 
 def parse_args():
     """Parse command line arguments"""
@@ -485,7 +703,7 @@ def main():
         )
         
         # Evaluate
-        val_loss, val_acc, val_preds, val_targets = evaluate(
+        val_loss, val_acc, _, _ = evaluate(
             model, val_loader, criterion, device
         )
         
@@ -509,12 +727,17 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_acc': val_acc,
-                'args': args
+                'args': args,
+                'model_type': 'snn'
             }, os.path.join(args.save_dir, 'best_model.pth'))
             print(f'Saved best model with validation accuracy: {val_acc:.2f}%')
     
+    # Create plots directory
+    plots_dir = os.path.join(args.save_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
     # Plot results
-    plot_training_history(train_losses, val_losses, train_accs, val_accs)
+    plot_training_history(train_losses, val_losses, train_accs, val_accs, save_dir=plots_dir)
     
     # Final evaluation with best model
     checkpoint = torch.load(os.path.join(args.save_dir, 'best_model.pth'))
@@ -530,11 +753,17 @@ def main():
                               target_names=['Uncracked', 'Cracked']))
     
     # Confusion matrix
-    plot_confusion_matrix(final_targets, final_preds)
+    plot_confusion_matrix(final_targets, final_preds, save_dir=plots_dir, model_name='Spiking_ResNet')
     
-    # Save final model
-    torch.save(model.state_dict(), 
-              os.path.join(args.save_dir, 'final_model.pth'))
+    # Save final model (consistent format with best_model.pth)
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'final_val_acc': best_val_acc,
+        'args': args,
+        'model_type': 'snn'
+    }, os.path.join(args.save_dir, 'final_model.pth'))
+    
+    print(f"Final model saved to {os.path.join(args.save_dir, 'final_model.pth')}")
 
 def inference_example():
     """Example inference function for a single image"""
@@ -610,6 +839,13 @@ def run_cross_validation_mode(args, device):
         SpikingResNetCrackDetector, full_dataset, config
     )
     
+    # Generate cross-validation plots
+    plots_dir = os.path.join(args.results_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    print("\nGenerating cross-validation plots...")
+    plot_cross_validation_results(results, save_dir=plots_dir)
+    
     print("\nCross-validation completed successfully!")
     return results
 
@@ -641,6 +877,9 @@ def run_baseline_comparison_mode(args, device):
     snn_results = evaluate_model_comprehensive(snn_model, train_loader, val_loader, device, args)
     comparator.add_model_results("Spiking ResNet", snn_results)
     
+    # Save the SNN model from baseline comparison
+    save_baseline_model(snn_model, "Spiking ResNet", snn_results, save_dir=args.save_dir)
+    
     # Evaluate CNN baselines
     print("\n2. Evaluating CNN Baselines...")
     cnn_models = {
@@ -654,9 +893,30 @@ def run_baseline_comparison_mode(args, device):
         model = model.to(device)
         results = evaluate_model_comprehensive(model, train_loader, val_loader, device, args)
         comparator.add_model_results(model_name, results)
+        
+        # Save the trained model
+        save_baseline_model(model, model_name, results, save_dir=args.save_dir)
     
     # Generate comparison table
     comparator.generate_crackvision_comparison_table()
+    
+    # Generate comprehensive figures
+    plots_dir = os.path.join(args.results_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    print("\nGenerating comparison plots...")
+    plot_model_comparison(comparator.results, save_dir=plots_dir)
+    plot_training_time_comparison(comparator.results, save_dir=plots_dir)
+    
+    # Generate individual confusion matrices for each model
+    for model_name in comparator.results.keys():
+        if 'y_true' in comparator.results[model_name] and 'y_pred' in comparator.results[model_name]:
+            plot_confusion_matrix(
+                comparator.results[model_name]['y_true'], 
+                comparator.results[model_name]['y_pred'],
+                save_dir=plots_dir, 
+                model_name=model_name
+            )
     
     # Save results
     results_path = os.path.join(args.results_dir, 'baseline_comparison.json')
@@ -665,6 +925,53 @@ def run_baseline_comparison_mode(args, device):
         json.dump(comparator.results, f, indent=2, default=str)
     
     print(f"\nBaseline comparison results saved to {results_path}")
+    print(f"Plots saved to {plots_dir}")
+    return comparator.results
+
+def run_baseline_comparison_cnn_only(args, device):
+    """Run baseline comparison evaluation mode for CNN models only (no SNN)"""
+    print("\n" + "="*50)
+    print("RUNNING CNN BASELINE EVALUATION ONLY")
+    print("="*50)
+    
+    # Create data loaders
+    train_loader, val_loader = create_data_loaders(
+        args.data_dir, 
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        train_ratio=args.train_ratio
+    )
+    
+    comparator = ModelComparator()
+    
+    # Evaluate CNN baselines only
+    print("\nEvaluating CNN Baselines...")
+    cnn_models = {
+        "ResNet50 (CrackVision)": CNNBaseline('resnet50', args.num_classes),
+        "ResNet18": CNNBaseline('resnet18', args.num_classes),
+        "Xception-style": CNNBaseline('xception_style', args.num_classes)
+    }
+    
+    for model_name, model in cnn_models.items():
+        print(f"\nEvaluating {model_name}...")
+        model = model.to(device)
+        results = evaluate_model_comprehensive(model, train_loader, val_loader, device, args)
+        comparator.add_model_results(model_name, results)
+        
+        # Save the trained model
+        save_baseline_model(model, model_name, results, save_dir=args.save_dir)
+    
+    # Generate comparison table
+    comparator.generate_crackvision_comparison_table()
+    
+    # Generate figures for CNN models
+    plots_dir = os.path.join(args.results_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    print("\nGenerating CNN comparison plots...")
+    plot_model_comparison(comparator.results, save_dir=plots_dir)
+    plot_training_time_comparison(comparator.results, save_dir=plots_dir)
+    
     return comparator.results
 
 def run_comprehensive_evaluation_mode(args, device):
@@ -673,26 +980,56 @@ def run_comprehensive_evaluation_mode(args, device):
     print("RUNNING COMPREHENSIVE EVALUATION")
     print("="*60)
     
-    # Run cross-validation
+    # Run cross-validation first (this trains SNN multiple times across folds)
     print("\nPhase 1: Cross-Validation...")
     cv_results = run_cross_validation_mode(args, device)
     
-    # Run baseline comparison
-    print("\nPhase 2: Baseline Comparison...")
-    baseline_results = run_baseline_comparison_mode(args, device)
+    # Run baseline comparison WITHOUT training SNN again 
+    # (only train CNN baselines since SNN was already evaluated in CV)
+    print("\nPhase 2: Baseline Comparison (CNN models only)...")
+    baseline_results = run_baseline_comparison_cnn_only(args, device)
+    
+    # Add SNN results from cross-validation to baseline comparison
+    if 'mean_metrics' in cv_results:
+        snn_cv_metrics = cv_results['mean_metrics']
+        # Convert CV metrics to baseline comparison format
+        snn_baseline_metrics = {
+            'accuracy': snn_cv_metrics.get('accuracy', 0),
+            'precision': snn_cv_metrics.get('precision', 0),
+            'recall': snn_cv_metrics.get('recall', 0),
+            'f1_score': snn_cv_metrics.get('f1_score', 0),
+            'auc_roc': snn_cv_metrics.get('auc_roc', 0),
+            'training_time': snn_cv_metrics.get('total_training_time', 0) / args.cv_folds,
+            'inference_time': snn_cv_metrics.get('inference_time', 0),
+            'total_parameters': snn_cv_metrics.get('total_parameters', 0),
+            'model_size': snn_cv_metrics.get('model_size', 0)
+        }
+        baseline_results['Spiking ResNet (CV)'] = snn_baseline_metrics
     
     # Combined analysis
-    print("\nPhase 3: Combined Analysis...")
-    evaluator = ComprehensiveEvaluator()
+    print("\nPhase 3: Combined Analysis and Figure Generation...")
     
     # Create comprehensive comparison table
     create_crackvision_style_table(baseline_results, "SDNET2018")
     
+    # Generate comprehensive figures
+    plots_dir = os.path.join(args.results_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    print("Generating comprehensive comparison plots...")
+    plot_model_comparison(baseline_results, save_dir=plots_dir)
+    plot_training_time_comparison(baseline_results, save_dir=plots_dir)
+    
+    # Generate cross-validation plots if available
+    if cv_results and 'fold_results' in cv_results:
+        plot_cross_validation_results(cv_results, save_dir=plots_dir)
+    
     # Save comprehensive results
+    from datetime import datetime
     comprehensive_results = {
         'cross_validation': cv_results,
         'baseline_comparison': baseline_results,
-        'evaluation_date': str(torch.datetime.now()),
+        'evaluation_date': str(datetime.now()),
         'configuration': vars(args)
     }
     
@@ -708,7 +1045,7 @@ def evaluate_model_comprehensive(model, train_loader, val_loader, device, args):
     """Comprehensive model evaluation following CrackVision methodology"""
     import time
     
-    # Training
+    # Training setup
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(
         model.parameters(), 
@@ -716,22 +1053,40 @@ def evaluate_model_comprehensive(model, train_loader, val_loader, device, args):
         weight_decay=args.weight_decay
     )
     
-    start_time = time.time()
+    # Learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=min(args.num_epochs, 10)
+    )
     
-    # Simple training loop
-    model.train()
+    # Mixed precision scaler
+    use_amp = not args.no_amp and device.type == 'cuda'
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
+    
+    start_time = time.time()
+    best_val_acc = 0
+    
+    # Proper training loop (using main function logic)
     for epoch in range(min(args.num_epochs, 10)):  # Limit epochs for comparison
-        for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)
-            
-            optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
-            
-            if batch_idx % 50 == 0:
-                print(f'Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}')
+        # Train epoch
+        train_loss, train_acc = train_epoch(
+            model, train_loader, criterion, optimizer, 
+            device, scaler
+        )
+        
+        # Evaluate
+        _, val_acc, _, _ = evaluate(
+            model, val_loader, criterion, device
+        )
+        
+        # Update scheduler
+        scheduler.step()
+        
+        # Track best validation accuracy
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+        
+        if epoch % 2 == 0:  # Print every 2 epochs to reduce output
+            print(f'Epoch {epoch+1}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%, Val Acc: {val_acc:.2f}%')
     
     training_time = time.time() - start_time
     
@@ -775,7 +1130,43 @@ def evaluate_model_comprehensive(model, train_loader, val_loader, device, args):
     metrics['total_parameters'] = total_params
     metrics['model_size'] = total_params * 4 / (1024 * 1024)  # MB (assuming float32)
     
+    # Store data for figure generation
+    metrics['y_true'] = np.array(all_targets)
+    metrics['y_pred'] = np.array(all_preds)
+    metrics['y_prob'] = np.array(all_probs)
+    
     return metrics
+
+def save_baseline_model(model, model_name: str, metrics: dict, save_dir: str = 'checkpoints'):
+    """Save a baseline model with consistent naming and metadata"""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Create safe filename
+    safe_name = model_name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_')
+    model_path = os.path.join(save_dir, f'{safe_name}_baseline.pth')
+    
+    # Determine model type
+    model_type = 'cnn'
+    if hasattr(model, 'architecture'):
+        model_type = model.architecture
+    elif 'resnet50' in model_name.lower():
+        model_type = 'resnet50'
+    elif 'resnet18' in model_name.lower():
+        model_type = 'resnet18'
+    elif 'xception' in model_name.lower():
+        model_type = 'xception'
+    
+    # Save model with metadata
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'model_name': model_name,
+        'model_type': model_type,
+        'val_acc': metrics.get('accuracy', 0),
+        'metrics': {k: v for k, v in metrics.items() if not isinstance(v, np.ndarray)}
+    }, model_path)
+    
+    print(f"Saved {model_name} to {model_path}")
+    return model_path
 
 if __name__ == '__main__':
     main()
