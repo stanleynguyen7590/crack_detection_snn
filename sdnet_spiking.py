@@ -8,6 +8,7 @@ Architecture: Spiking ResNet-18 adapted for binary classification
 """
 
 import os
+import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -193,7 +194,7 @@ class DirectEncodingSpikingResNet(nn.Module):
         
         return out
 
-def create_data_loaders(data_dir: str, batch_size: int = 32, num_workers: int = 4):
+def create_data_loaders(data_dir: str, batch_size: int = 32, num_workers: int = 4, train_ratio: float = 0.8):
     """Create data loaders with appropriate transforms"""
     
     # Data augmentation for training
@@ -215,8 +216,8 @@ def create_data_loaders(data_dir: str, batch_size: int = 32, num_workers: int = 
     ])
     
     # Create datasets
-    train_dataset = SDNET2018Dataset(data_dir, split='train', transform=train_transform)
-    val_dataset = SDNET2018Dataset(data_dir, split='val', transform=val_transform)
+    train_dataset = SDNET2018Dataset(data_dir, split='train', transform=train_transform, train_ratio=train_ratio)
+    val_dataset = SDNET2018Dataset(data_dir, split='val', transform=val_transform, train_ratio=train_ratio)
     
     # Create data loaders
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
@@ -240,7 +241,7 @@ def train_epoch(model, loader, criterion, optimizer, device, scaler=None):
         
         if scaler is not None:
             # Mixed precision training
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 output = model(data)
                 loss = criterion(output, target)
             
@@ -332,72 +333,135 @@ def plot_confusion_matrix(y_true, y_pred):
     plt.savefig('confusion_matrix.png')
     plt.show()
 
+def parse_args():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description='Spiking ResNet for SDNET2018 Concrete Crack Detection',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    
+    # Data parameters
+    parser.add_argument('--data-dir', type=str, 
+                       default='/home/duyanh/Workspace/SDNET_spiking/SDNET2018',
+                       help='Path to SDNET2018 dataset directory')
+    parser.add_argument('--batch-size', type=int, default=8,
+                       help='Training batch size')
+    parser.add_argument('--num-workers', type=int, default=4,
+                       help='Number of data loading workers')
+    
+    # Training parameters
+    parser.add_argument('--num-epochs', type=int, default=20,
+                       help='Number of training epochs')
+    parser.add_argument('--learning-rate', '--lr', type=float, default=1e-3,
+                       help='Learning rate')
+    parser.add_argument('--weight-decay', type=float, default=1e-4,
+                       help='Weight decay (L2 regularization)')
+    
+    # Model parameters
+    parser.add_argument('--time-steps', '-T', type=int, default=10,
+                       help='Number of time steps for spiking network')
+    parser.add_argument('--num-classes', type=int, default=2,
+                       help='Number of output classes')
+    
+    # Training options
+    parser.add_argument('--no-amp', action='store_true',
+                       help='Disable automatic mixed precision training')
+    parser.add_argument('--device', type=str, default='auto',
+                       choices=['auto', 'cpu', 'cuda'],
+                       help='Device to use for training')
+    
+    # Checkpoint and output
+    parser.add_argument('--save-dir', type=str, default='checkpoints',
+                       help='Directory to save model checkpoints')
+    parser.add_argument('--resume', type=str, default=None,
+                       help='Path to checkpoint to resume training from')
+    
+    # Data augmentation
+    parser.add_argument('--train-ratio', type=float, default=0.8,
+                       help='Ratio of data to use for training (rest for validation)')
+    
+    return parser.parse_args()
+
 def main():
     """Main training function"""
-    # Configuration
-    config = {
-        'data_dir': '/home/duyanh/Workspace/SDNET_spiking/SDNET2018',  # Update this path
-        'batch_size': 8,
-        'num_epochs': 20,
-        'learning_rate': 1e-3,
-        'weight_decay': 1e-4,
-        'T': 10,  # Time steps
-        'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-        'use_amp': True,  # Automatic mixed precision
-        'save_dir': 'checkpoints'
-    }
+    # Parse command line arguments
+    args = parse_args()
     
-    os.makedirs(config['save_dir'], exist_ok=True)
+    # Setup device
+    if args.device == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(args.device)
+    
+    print(f"Using device: {device}")
+    print(f"Arguments: {args}")
+    
+    # Create save directory
+    os.makedirs(args.save_dir, exist_ok=True)
     
     # Create data loaders
     train_loader, val_loader = create_data_loaders(
-        config['data_dir'], 
-        batch_size=config['batch_size']
+        args.data_dir, 
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        train_ratio=args.train_ratio
     )
     
     # Create model
     model = SpikingResNetCrackDetector(
         spiking_neuron=neuron.IFNode,
         surrogate_function=surrogate.ATan(),
-        num_classes=2,
-        T=config['T']
-    ).to(config['device'])
+        num_classes=args.num_classes,
+        T=args.time_steps
+    ).to(device)
+    
+    # Load from checkpoint if specified
+    start_epoch = 0
+    if args.resume:
+        print(f"Resuming training from {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        print(f"Resuming from epoch {start_epoch}")
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(
         model.parameters(), 
-        lr=config['learning_rate'],
-        weight_decay=config['weight_decay']
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay
     )
     
     # Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=config['num_epochs']
+        optimizer, T_max=args.num_epochs
     )
     
     # Mixed precision scaler
-    scaler = torch.cuda.amp.GradScaler() if config['use_amp'] else None
+    use_amp = not args.no_amp and device.type == 'cuda'
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
+    
+    print(f"Mixed precision training: {use_amp}")
     
     # Training history
     train_losses, val_losses = [], []
     train_accs, val_accs = [], []
     best_val_acc = 0
     
-    # Training loop
-    for epoch in range(config['num_epochs']):
-        print(f'\nEpoch {epoch+1}/{config["num_epochs"]}')
+    # Training loop  
+    for epoch in range(start_epoch, args.num_epochs):
+        print(f'\nEpoch {epoch+1}/{args.num_epochs}')
         print('-' * 50)
         
         # Train
         train_loss, train_acc = train_epoch(
             model, train_loader, criterion, optimizer, 
-            config['device'], scaler
+            device, scaler
         )
         
         # Evaluate
         val_loss, val_acc, val_preds, val_targets = evaluate(
-            model, val_loader, criterion, config['device']
+            model, val_loader, criterion, device
         )
         
         # Update scheduler
@@ -420,19 +484,19 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_acc': val_acc,
-                'config': config
-            }, os.path.join(config['save_dir'], 'best_model.pth'))
+                'args': args
+            }, os.path.join(args.save_dir, 'best_model.pth'))
             print(f'Saved best model with validation accuracy: {val_acc:.2f}%')
     
     # Plot results
     plot_training_history(train_losses, val_losses, train_accs, val_accs)
     
     # Final evaluation with best model
-    checkpoint = torch.load(os.path.join(config['save_dir'], 'best_model.pth'))
+    checkpoint = torch.load(os.path.join(args.save_dir, 'best_model.pth'))
     model.load_state_dict(checkpoint['model_state_dict'])
     
     _, _, final_preds, final_targets = evaluate(
-        model, val_loader, criterion, config['device']
+        model, val_loader, criterion, device
     )
     
     # Classification report
@@ -445,7 +509,7 @@ def main():
     
     # Save final model
     torch.save(model.state_dict(), 
-              os.path.join(config['save_dir'], 'final_model.pth'))
+              os.path.join(args.save_dir, 'final_model.pth'))
 
 def inference_example():
     """Example inference function for a single image"""

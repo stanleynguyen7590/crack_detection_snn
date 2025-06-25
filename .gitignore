@@ -2,3 +2,6 @@ SDNET2018/
 *.png
 sdnet_spiking/
 checkpoints/
+CLAUDE.md
+test_arg/
+*.pdf
