@@ -54,12 +54,21 @@ class ManualPlotter:
             
             # Load checkpoint
             if model_path.endswith('.pth'):
-                checkpoint = torch.load(model_path, map_location='cpu')
+                try:
+                    # Try safe loading first
+                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=True)
+                except Exception:
+                    # Fall back to unsafe loading for compatibility
+                    print("Warning: Using unsafe loading due to checkpoint format compatibility")
+                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+                
                 if 'model_state_dict' in checkpoint:
                     model.load_state_dict(checkpoint['model_state_dict'])
                     # Print additional info if available
                     if 'val_acc' in checkpoint:
-                        print(f"Model validation accuracy: {checkpoint['val_acc']:.2f}%")
+                        val_acc = checkpoint['val_acc']
+                        if isinstance(val_acc, (int, float)):
+                            print(f"Model validation accuracy: {val_acc:.2f}%")
                     if 'model_type' in checkpoint:
                         print(f"Model type: {checkpoint['model_type']}")
                 else:
@@ -70,12 +79,21 @@ class ManualPlotter:
             model = CNNBaseline(architecture, num_classes)
             
             # Load CNN model
-            checkpoint = torch.load(model_path, map_location='cpu')
+            try:
+                # Try safe loading first
+                checkpoint = torch.load(model_path, map_location='cpu', weights_only=True)
+            except Exception:
+                # Fall back to unsafe loading for compatibility
+                print("Warning: Using unsafe loading due to checkpoint format compatibility")
+                checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+            
             if 'model_state_dict' in checkpoint:
                 model.load_state_dict(checkpoint['model_state_dict'])
                 # Print additional info if available
                 if 'val_acc' in checkpoint:
-                    print(f"Model validation accuracy: {checkpoint['val_acc']:.2f}%")
+                    val_acc = checkpoint['val_acc']
+                    if isinstance(val_acc, (int, float)):
+                        print(f"Model validation accuracy: {val_acc:.2f}%")
                 if 'model_name' in checkpoint:
                     print(f"Model name: {checkpoint['model_name']}")
             else:

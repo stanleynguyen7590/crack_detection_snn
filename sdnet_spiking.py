@@ -654,7 +654,11 @@ def main():
     start_epoch = 0
     if args.resume:
         print(f"Resuming training from {args.resume}")
-        checkpoint = torch.load(args.resume, map_location=device)
+        try:
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=True)
+        except Exception:
+            print("Warning: Using unsafe loading due to checkpoint format compatibility")
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         print(f"Resuming from epoch {start_epoch}")
@@ -740,7 +744,11 @@ def main():
     plot_training_history(train_losses, val_losses, train_accs, val_accs, save_dir=plots_dir)
     
     # Final evaluation with best model
-    checkpoint = torch.load(os.path.join(args.save_dir, 'best_model.pth'))
+    try:
+        checkpoint = torch.load(os.path.join(args.save_dir, 'best_model.pth'), weights_only=True)
+    except Exception:
+        print("Warning: Using unsafe loading due to checkpoint format compatibility")
+        checkpoint = torch.load(os.path.join(args.save_dir, 'best_model.pth'), weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     
     _, _, final_preds, final_targets = evaluate(
@@ -769,7 +777,12 @@ def inference_example():
     """Example inference function for a single image"""
     # Load model
     model = SpikingResNetCrackDetector(num_classes=2, T=4)
-    model.load_state_dict(torch.load('checkpoints/best_model.pth')['model_state_dict'])
+    try:
+        checkpoint = torch.load('checkpoints/best_model.pth', weights_only=True)
+    except Exception:
+        print("Warning: Using unsafe loading due to checkpoint format compatibility")
+        checkpoint = torch.load('checkpoints/best_model.pth', weights_only=False)
+    model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
     # Prepare image
