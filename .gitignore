@@ -8,3 +8,7 @@ test_arg/
 plan_1.md
 plan.md
 crackvision.md
+results/
+__pycache__/
+.claude/
+logs/
