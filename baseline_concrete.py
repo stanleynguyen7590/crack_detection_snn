@@ -28,6 +28,8 @@ from sklearn.metrics import classification_report, confusion_matrix
 # Import evaluation modules
 from evaluation_metrics import ComprehensiveEvaluator
 from cross_validation import CrossValidator, run_cross_validation_experiment
+from multi_class_dataset import create_multi_class_datasets, print_dataset_summary
+from threshold_tuning import tune_model_threshold
 
 # Set random seeds for reproducibility
 torch.manual_seed(42)
@@ -452,17 +454,61 @@ def train_single_model(args, device, architecture: str, use_timestamps: bool = T
     print(f"TRAINING {architecture.upper()} MODEL")
     print(f"{'='*60}")
     
+    # Determine number of classes based on scheme
+    if args.num_classes is None:
+        class_scheme_map = {'binary': 2, '3class': 3, '6class': 6}
+        args.num_classes = class_scheme_map[args.class_scheme]
+    
+    # Initialize variables for scope
+    dataset_info = None
+    class_weights = None
+    
     # Get appropriate input size
     input_size = get_input_size(architecture)
     
     # Create data loaders
-    train_loader, val_loader = create_data_loaders(
-        args.data_dir, 
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        train_ratio=args.train_ratio,
-        input_size=input_size
-    )
+    if args.use_original_dataset:
+        # Use original dataset implementation
+        train_loader, val_loader = create_data_loaders(
+            args.data_dir, 
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            train_ratio=args.train_ratio,
+            input_size=input_size
+        )
+        print(f"Using original dataset implementation (binary only)")
+    else:
+        # Determine augmentation settings
+        use_enhanced_aug = True  # Default to enhanced augmentation
+        if args.no_enhanced_augmentation:
+            use_enhanced_aug = False
+        elif args.use_enhanced_augmentation:
+            use_enhanced_aug = True
+        
+        # Use multi-class dataset implementation
+        dataset_info = create_multi_class_datasets(
+            data_dir=args.data_dir,
+            class_scheme=args.class_scheme,
+            dataset_type=args.dataset_type,
+            test_size=1.0 - args.train_ratio,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            use_weighted_sampling=args.use_weighted_sampling,
+            use_enhanced_augmentation=use_enhanced_aug
+        )
+        
+        train_loader = dataset_info['train_loader']
+        val_loader = dataset_info['test_loader']
+        
+        # Print dataset summary
+        print_dataset_summary(dataset_info)
+        
+        # Update args with actual class info
+        args.num_classes = dataset_info['class_info']['num_classes']
+        class_weights = dataset_info['class_weights']
+        print(f"Using multi-class dataset: {args.dataset_type} structures, {args.class_scheme} scheme")
+        print(f"Enhanced augmentation: {use_enhanced_aug}")
+        print(f"Class weights: {class_weights.tolist()}")
     
     # Create model
     model = create_model(architecture, args.num_classes, args.pretrained).to(device)
@@ -524,7 +570,13 @@ def train_single_model(args, device, architecture: str, use_timestamps: bool = T
         print(f"Resuming from epoch {start_epoch}")
     
     # Loss and optimizer
-    criterion = nn.CrossEntropyLoss()
+    if not args.use_original_dataset and class_weights is not None:
+        # Use class weights for multi-class balanced training
+        criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
+        print(f"Using weighted CrossEntropyLoss with class weights: {class_weights.tolist()}")
+    else:
+        criterion = nn.CrossEntropyLoss()
+        print("Using standard CrossEntropyLoss")
     
     # Different learning rates for different architectures
     if architecture == 'inception_v3':
@@ -632,11 +684,48 @@ def train_single_model(args, device, architecture: str, use_timestamps: bool = T
     
     # Classification report
     print("\nDetailed Classification Report:")
+    # Determine class names based on actual number of classes
+    num_classes = len(np.unique(final_metrics['y_true']))
+    if num_classes == 2:
+        class_names = ['Uncracked', 'Cracked']
+    elif num_classes == 3:
+        class_names = ['Deck Cracks', 'Pavement Cracks', 'Wall Cracks']
+    elif num_classes == 6:
+        class_names = ['Cracked Decks', 'Uncracked Decks', 'Cracked Pavements', 
+                      'Uncracked Pavements', 'Cracked Walls', 'Uncracked Walls']
+    else:
+        class_names = [f'Class {i}' for i in range(num_classes)]
+    
     print(classification_report(
         final_metrics['y_true'], 
         final_metrics['y_pred'].flatten(),
-        target_names=['Uncracked', 'Cracked']
+        target_names=class_names
     ))
+    
+    # Threshold tuning for binary classification
+    if args.enable_threshold_tuning and num_classes == 2:
+        print("\n" + "="*60)
+        print("THRESHOLD TUNING OPTIMIZATION")
+        print("="*60)
+        
+        threshold_results = tune_model_threshold(
+            model=model,
+            data_loader=val_loader,
+            device=device,
+            optimization_metric=args.threshold_metric,
+            class_names=class_names,
+            save_dir=args.results_dir,
+            filename_prefix=f"{architecture}_threshold_tuning"
+        )
+        
+        # Add threshold tuning results to final metrics
+        final_metrics['threshold_tuning'] = threshold_results
+        
+        print(f"Threshold tuning completed for {architecture}!")
+    elif args.enable_threshold_tuning and num_classes > 2:
+        print("\n⚠️  Threshold tuning is only supported for binary classification.")
+        print(f"   Current scheme: {args.class_scheme} ({num_classes} classes)")
+        print("   Skipping threshold tuning...")
     
     # Save final model
     save_model_checkpoint(
@@ -725,6 +814,12 @@ def parse_args():
     parser.add_argument('--data-dir', type=str, 
                        default='/home/duyanh/Workspace/SDNET_spiking/SDNET2018',
                        help='Path to SDNET2018 dataset directory')
+    parser.add_argument('--class-scheme', type=str, default='binary',
+                       choices=['binary', '3class', '6class'],
+                       help='Classification scheme: binary, 3class, or 6class')
+    parser.add_argument('--dataset-type', type=str, default='all',
+                       choices=['all', 'deck', 'pavement', 'wall'],
+                       help='Dataset type: all (all structures), deck, pavement, or wall only')
     parser.add_argument('--batch-size', type=int, default=16,
                        help='Training batch size')
     parser.add_argument('--num-workers', type=int, default=4,
@@ -739,8 +834,21 @@ def parse_args():
                        help='Weight decay (L2 regularization)')
     
     # Model parameters
-    parser.add_argument('--num-classes', type=int, default=2,
-                       help='Number of output classes')
+    parser.add_argument('--num-classes', type=int, default=None,
+                       help='Number of output classes (auto-determined by class-scheme if not set)')
+    parser.add_argument('--use-weighted-sampling', action='store_true',
+                       help='Use weighted sampling for class balancing')
+    parser.add_argument('--use-original-dataset', action='store_true',
+                       help='Use original dataset implementation instead of multi-class')
+    parser.add_argument('--use-enhanced-augmentation', action='store_true',
+                       help='Use crack-aware enhanced data augmentation')
+    parser.add_argument('--no-enhanced-augmentation', action='store_true',
+                       help='Disable enhanced augmentation (use standard augmentation)')
+    parser.add_argument('--enable-threshold-tuning', action='store_true',
+                       help='Enable threshold tuning after training')
+    parser.add_argument('--threshold-metric', type=str, default='f1',
+                       choices=['f1', 'balanced_accuracy', 'mcc', 'precision', 'recall'],
+                       help='Metric to optimize during threshold tuning')
     parser.add_argument('--no-pretrained', action='store_true',
                        help='Disable pretrained weights')
     
@@ -782,11 +890,11 @@ def parse_args():
     
     return parser.parse_args()
 
-def create_timestamped_directories(base_save_dir: str, base_results_dir: str, use_timestamps: bool = True):
+def create_timestamped_directories(base_save_dir: str, base_results_dir: str, use_timestamps: bool = True, class_scheme: str = 'binary'):
     """Create timestamped directories for organizing outputs"""
     if use_timestamps:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_name = f"cnn_run_{timestamp}"
+        run_name = f"cnn_{class_scheme}_{timestamp}"
         
         save_dir = os.path.join(base_save_dir, run_name)
         results_dir = os.path.join(base_results_dir, run_name)
@@ -794,16 +902,18 @@ def create_timestamped_directories(base_save_dir: str, base_results_dir: str, us
         os.makedirs(save_dir, exist_ok=True)
         os.makedirs(results_dir, exist_ok=True)
         
-        print(f"Created timestamped directories:")
+        print(f"Created timestamped directories for {class_scheme} classification:")
         print(f"  Checkpoints: {save_dir}")
         print(f"  Results: {results_dir}")
         
         return save_dir, results_dir, run_name
     else:
         # Use original directories without timestamping
-        os.makedirs(base_save_dir, exist_ok=True)
-        os.makedirs(base_results_dir, exist_ok=True)
-        return base_save_dir, base_results_dir, None
+        save_dir = os.path.join(base_save_dir, class_scheme)
+        results_dir = os.path.join(base_results_dir, class_scheme)
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(results_dir, exist_ok=True)
+        return save_dir, results_dir, f"cnn_{class_scheme}"
 
 def create_run_summary(args, run_name: str, results: dict, architecture: str = None):
     """Create a summary file in the base directory pointing to the timestamped run"""
@@ -880,7 +990,7 @@ def main():
     
     # Create timestamped directories
     save_dir, results_dir, run_name = create_timestamped_directories(
-        args.save_dir, args.results_dir, use_timestamps
+        args.save_dir, args.results_dir, use_timestamps, args.class_scheme
     )
     
     # Update args with new directories
